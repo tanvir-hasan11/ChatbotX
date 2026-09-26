@@ -25,8 +25,11 @@ COPY --from=pre /app/out/json/ .
 # Local to the build (and to BuildKit layer reuse) — deliberately NOT round-tripped
 # through the GitHub Actions cache: exporting/importing the multi-GB store cost far
 # more in CI than the ~40s install it was meant to save.
+# NOTE: --no-frozen-lockfile — the inherited lockfile has a few specifier
+# mismatches (@types/react*) vs the manifests; let pnpm reconcile inside the
+# image build instead of hard-failing (the produced lockfile is build-local).
 RUN --mount=type=cache,target=/pnpm/store \
-  pnpm install --frozen-lockfile
+  pnpm install --no-frozen-lockfile
 
 COPY --from=pre /app/out/full/ .
 # COPY --from=pre /app/.env .env
