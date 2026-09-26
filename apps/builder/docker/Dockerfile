@@ -17,7 +17,11 @@ RUN turbo prune builder --docker
 
 # Install dependencies
 FROM base AS deps
-ENV NODE_OPTIONS="--max-old-space-size=4096"
+# `next build` on this monorepo needs well over the 4GB default V8 heap. The
+# GitHub-hosted runner has ~16GB RAM, so give V8 8GB and leave headroom for the
+# OS + webpack worker processes. Note: this ENV is overridden if a package
+# build script sets NODE_OPTIONS inline — see apps/builder/package.json.
+ENV NODE_OPTIONS="--max-old-space-size=8192"
 
 WORKDIR /app
 COPY --from=pre /app/out/json/ .
@@ -53,11 +57,14 @@ ENV BETTER_AUTH_URL="http://localhost:3000"
 #   remote-cache hit restores `.next/**` and skips `next build` entirely. This is
 #   the only mechanism that can actually skip the build; wiring it up is a
 #   secrets-only change.
+# NODE_OPTIONS is re-stated inline here so the heap size survives even if a
+# workspace build script or turbo config tries to reset it (this was the cause
+# of a 4096MB heap cap that aborted the build with exit code 134).
 RUN --mount=type=cache,target=/app/apps/builder/.next/cache \
   --mount=type=secret,id=TURBO_API,env=TURBO_API \
   --mount=type=secret,id=TURBO_TOKEN,env=TURBO_TOKEN \
   --mount=type=secret,id=TURBO_TEAM,env=TURBO_TEAM \
-  SKIP_ENV_CHECK=true pnpm turbo run build --filter=builder
+  SKIP_ENV_CHECK=true NODE_OPTIONS="--max-old-space-size=8192" pnpm turbo run build --filter=builder
 
 # Standalone image has no pnpm workspace; bundle a tiny migration runner (drizzle-orm + pg only).
 RUN apt-get update && apt-get install -y --no-install-recommends jq \
