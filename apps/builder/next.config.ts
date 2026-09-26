@@ -41,13 +41,9 @@ const nextConfig: NextConfig = {
     },
     // Additive to Next's built-in default list, which already covers
     // lucide-react. `@chatbotx.io/ui` doesn't belong here: it's imported via
-    // per-file subpaths and its root export is not a re-export barrel, so
-    // there is nothing for this optimization to rewrite.
+    // per-file subpaths and its root export is not a re-export barrel, so there
+    // is nothing for this optimization to rewrite.
     optimizePackageImports: ["@icons-pack/react-simple-icons"],
-    // turbopackServerFastRefresh: false,
-    // The Docker build starts from a clean layer and `.next/cache` is not
-    // persisted across CI runs, so this cache is written and never read.
-    turbopackFileSystemCacheForBuild: false,
   },
   poweredByHeader: false,
   async rewrites() {
