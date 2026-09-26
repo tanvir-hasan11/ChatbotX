@@ -1,0 +1,40 @@
+# ORIN reverse proxy for the single-host Oracle stack.
+# Caddy fetches and renews the Let's Encrypt certificate for {$ORIN_DOMAIN} automatically,
+# which is why no separate certbot step is needed. ORIN_DOMAIN is injected by
+# docker-compose.orin.yml (see the `caddy` service's `environment:` block).
+
+{$ORIN_DOMAIN} {
+	encode gzip
+
+	# Uploaded files / avatars / chat attachments live in the local RustFS bucket.
+	# handle_path strips the /storage prefix, so /storage/<bucket>/<key> maps to
+	# the RustFS object path the app writes.
+	handle_path /storage/* {
+		reverse_proxy filesystem:9000
+	}
+
+	# Realtime (PartyKit) WebSocket endpoint. The browser dials wss://<domain>/ws/...
+	# and this forwards it to the realtime container without touching the builder.
+	@ws path /ws/*
+	handle @ws {
+		reverse_proxy realtime:1999
+	}
+
+	# Everything else: the Next.js builder.
+	handle {
+		reverse_proxy builder:3000
+	}
+
+	# Security headers (safe defaults; tweak if you embed ORIN in an iframe elsewhere).
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}
