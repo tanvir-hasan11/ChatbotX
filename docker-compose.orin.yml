@@ -1,0 +1,201 @@
+# ORIN — single-host production stack for Oracle Cloud Always Free (ARM Ampere A1).
+#
+# Runs EVERYTHING on one 24 GB / 4-core ARM VM:
+#   postgres + redis + rustfs (S3) + javascript-executor + builder + worker + realtime
+#   behind Caddy, which gets a free Let's Encrypt certificate automatically.
+#
+# No external Neon / Upstash / R2 / GHCR / Render needed.
+#
+# Usage:
+#   cp .env.orin.oracle.example .env
+#   nano .env                       # fill in secrets + domain
+#   docker compose -f docker-compose.orin.yml up -d --build
+#
+# Note: no `platform:` directives anywhere — this file targets the host's
+# native architecture (linux/arm64 on Ampere A1, linux/amd64 on AMD free tier).
+
+name: orin
+
+x-common: &common
+  restart: unless-stopped
+  env_file:
+    - ./.env
+  networks:
+    - orin
+
+x-worker: &worker
+  <<: *common
+  build:
+    context: .
+    dockerfile: apps/worker/docker/Dockerfile
+
+services:
+  postgres:
+    <<: *common
+    image: timescale/timescaledb-ha:pg18-all
+    volumes:
+      - db-data:/home/postgres/pgdata
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-orin}
+      POSTGRES_USER: ${POSTGRES_USER:-orin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d $${POSTGRES_DB} -U $${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+
+  redis:
+    <<: *common
+    image: redis:8-alpine
+    volumes:
+      - cache-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  filesystem:
+    <<: *common
+    image: rustfs/rustfs:latest
+    command: server /data --console-address ":9001"
+    environment:
+      RUSTFS_ACCESS_KEY: ${S3_ACCESS_KEY_ID:-orin}
+      RUSTFS_SECRET_KEY: ${S3_SECRET_ACCESS_KEY:-changeme}
+      RUSTFS_API_CORS_ALLOW_ORIGIN: ${RUSTFS_API_CORS_ALLOW_ORIGIN:-*}
+    volumes:
+      - filesystem-data:/data
+    healthcheck:
+      test: ["CMD", "sh", "-c", "curl -fsS http://127.0.0.1:9000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 8
+      start_period: 60s
+
+  filesystem-init:
+    <<: *common
+    image: rustfs/rc:latest
+    restart: "no"
+    depends_on:
+      filesystem:
+        condition: service_healthy
+    environment:
+      RUSTFS_ACCESS_KEY: ${S3_ACCESS_KEY_ID:-orin}
+      RUSTFS_SECRET_KEY: ${S3_SECRET_ACCESS_KEY:-changeme}
+    entrypoint: >
+      /bin/sh -c "rc alias set local http://filesystem:9000
+      $${RUSTFS_ACCESS_KEY} $${RUSTFS_SECRET_KEY};
+      rc mb local/${S3_BUCKET:-orin} --ignore-existing;
+      touch /tmp/empty && rc cp /tmp/empty local/${S3_BUCKET:-orin}/public/;
+      rc anonymous set public local/${S3_BUCKET:-orin}/public;"
+
+  javascript-executor:
+    <<: *common
+    build:
+      context: .
+      dockerfile: apps/javascript-executor/docker/Dockerfile
+    environment:
+      JAVASCRIPT_EXECUTOR_TOKEN: ${JAVASCRIPT_EXECUTOR_TOKEN}
+      MAX_CONCURRENCY: ${MAX_CONCURRENCY:-2}
+    networks:
+      - orin
+      - executor-internal
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,noexec,nosuid,nodev
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:3210/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 6
+      start_period: 20s
+
+  builder:
+    <<: *common
+    build:
+      context: .
+      dockerfile: apps/builder/docker/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      filesystem:
+        condition: service_healthy
+    environment:
+      RUN_DB_MIGRATE: "true"
+      RUN_DB_SEED: "true"
+      HOSTNAME: "0.0.0.0"
+      PORT: "3000"
+    expose:
+      - "3000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+
+  worker:
+    <<: *worker
+    networks:
+      - orin
+      - executor-internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      filesystem:
+        condition: service_healthy
+      javascript-executor:
+        condition: service_healthy
+    environment:
+      JAVASCRIPT_EXECUTOR_URL: http://javascript-executor:3210
+
+  realtime:
+    <<: *common
+    build:
+      context: .
+      dockerfile: apps/realtime/docker/Dockerfile
+    expose:
+      - "1999"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    environment:
+      ORIN_DOMAIN: ${ORIN_DOMAIN}
+    networks:
+      - orin
+    depends_on:
+      - builder
+      - realtime
+      - filesystem
+
+networks:
+  orin:
+    driver: bridge
+  executor-internal:
+    driver: bridge
+    internal: true
+
+volumes:
+  db-data:
+  cache-data:
+  filesystem-data:
+  caddy-data:
+  caddy-config:
